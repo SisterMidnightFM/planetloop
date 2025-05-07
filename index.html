@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orbital Sound Loops</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <script src="config.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            touch-action: none; /* Prevents default touch behaviors */
+        }
+        canvas {
+            display: block;
+        }
+        #instructions {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            user-select: none;
+        }
+        #startButton {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 15px 30px;
+            font-size: 18px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <button id="startButton">Start Audio</button>
+
+    <script>
+        // Wait for the DOM to be fully loaded
+        document.addEventListener('DOMContentLoaded', function () {
+            const startButton = document.getElementById('startButton');
+            startButton.addEventListener('click', async () => {
+                // Start the Tone.js audio context
+                await Tone.start();
+                console.log('Audio context started');
+
+                // Hide the start button
+                startButton.style.display = 'none';
+
+                // Initialize the app
+                init();
+            });
+        });
+
+        function init() {
+            // Canvas setup
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Resize canvas to fill window
+            function resizeCanvas() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+            
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            
+            // Set up audio players for loops
+            const players = [
+                new Tone.Player({
+                    url: "loop1.mp3", 
+                    loop: true,
+                    volume: -Infinity
+                }).toDestination(),
+                new Tone.Player({
+                    url: "loop2.mp3", 
+                    loop: true,
+                    volume: -Infinity
+                }).toDestination(),
+                new Tone.Player({
+                    url: "loop3.mp3", 
+                    loop: true,
+                    volume: -Infinity
+                }).toDestination(),
+                new Tone.Player({
+                    url: "loop4.mp3", 
+                    loop: true,
+                    volume: -Infinity
+                }).toDestination()
+            ];
+            
+            // Start all players when loaded
+            Tone.loaded().then(() => {
+                players.forEach(player => {
+                    player.start();
+                });
+            });
+            
+            // Create planets (audio sources)
+            class Planet {
+                constructor(index) {
+                    this.index = index;
+
+                    // Use planet size from config
+                    const sizeRange = CONFIG.planets.maxRadius - CONFIG.planets.minRadius;
+                    this.radius = CONFIG.planets.minRadius + Math.random() * sizeRange;
+
+                    // Use fixed size if specified
+                    if (CONFIG.planets.fixedRadius !== undefined) {
+                        this.radius = CONFIG.planets.fixedRadius;
+                    }
+
+                    this.x = Math.random() * (canvas.width - 2 * this.radius) + this.radius;
+                    this.y = Math.random() * (canvas.height - 2 * this.radius) + this.radius;
+                    this.color = CONFIG.planets.colors[index % CONFIG.planets.colors.length];
+                    this.mass = this.radius * CONFIG.planets.massFactor;
+                    this.orbiterCount = 0; // Count of particles orbiting this planet
+                    this.isDragging = false;
+
+                    // Initialize smoothed volume
+                    this.smoothedVolume = CONFIG.audio.minVolume;
+
+                    // Label for the planet
+                    this.label = `${index + 1}`;
+
+                    // Velocity for planet movement
+                    this.velocity = { x: 0, y: 0 };
+                }
+
+                draw() {
+                    // Draw the planet
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                    ctx.fillStyle = this.color;
+                    ctx.fill();
+
+                    // Calculate normalized volume
+                    const normalizedVolume = (this.smoothedVolume + Math.abs(CONFIG.audio.minVolume)) / Math.abs(CONFIG.audio.minVolume);
+
+                    // Draw the circle that grows/shrinks based on volume
+                    const volumeScale = 1 + normalizedVolume * CONFIG.effects.volumeGlowScale;
+                    const opacity = normalizedVolume * CONFIG.effects.maxVolumeOpacity; // Scale opacity based on volume
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius * volumeScale, 0, Math.PI * 2);
+                    ctx.fillStyle = `${hexToRgba(CONFIG.effects.volumeGlowColor, opacity)}`; // Use configurable color with dynamic opacity
+                    ctx.fill();
+
+                    // Draw the label if showLabels is true
+                    if (CONFIG.planets.showLabels) {
+                        ctx.font = '14px Arial';
+                        ctx.fillStyle = '#FFFFFF';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(this.label, this.x, this.y - this.radius - 10); // Position label above the planet
+                    }
+                }
+
+                update(planets) {
+                    // Apply gravitational forces and repelling forces from other planets
+                    for (const otherPlanet of planets) {
+                        if (otherPlanet === this) continue;
+
+                        const dx = otherPlanet.x - this.x;
+                        const dy = otherPlanet.y - this.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+
+                        if (distance > 0) {
+                            // Gravitational force between planets
+                            const gravitationalForce = CONFIG.physics.planetGravityConstant * (this.mass * otherPlanet.mass) / (distance * distance);
+                            this.velocity.x += (dx / distance) * gravitationalForce;
+                            this.velocity.y += (dy / distance) * gravitationalForce;
+
+                            // Repelling force if planets are too close
+                            const minDistance = this.radius + otherPlanet.radius + CONFIG.physics.forcefieldBuffer;
+                            if (distance < minDistance) {
+                                const overlap = minDistance - distance;
+                                const angle = Math.atan2(dy, dx);
+
+                                // Apply repelling force
+                                const repelForce = CONFIG.physics.planetRepelStrength * (overlap / minDistance);
+                                this.velocity.x -= Math.cos(angle) * repelForce;
+                                this.velocity.y -= Math.sin(angle) * repelForce;
+                                otherPlanet.velocity.x += Math.cos(angle) * repelForce;
+                                otherPlanet.velocity.y += Math.sin(angle) * repelForce;
+                            }
+                        }
+                    }
+
+                    // Repel planets from all sides of the screen with smoothing
+                    const sideBuffer = CONFIG.physics.forcefieldBuffer;
+                    const edgeSmoothing = CONFIG.physics.edgeRepelSmoothing;
+
+                    // Repel from the left edge
+                    if (this.x - this.radius < sideBuffer) {
+                        const overlap = sideBuffer - (this.x - this.radius);
+                        this.velocity.x += overlap * CONFIG.physics.repelStrength * edgeSmoothing;
+                    }
+
+                    // Repel from the right edge
+                    if (this.x + this.radius > canvas.width - sideBuffer) {
+                        const overlap = (this.x + this.radius) - (canvas.width - sideBuffer);
+                        this.velocity.x -= overlap * CONFIG.physics.repelStrength * edgeSmoothing;
+                    }
+
+                    // Repel from the top edge
+                    if (this.y - this.radius < sideBuffer) {
+                        const overlap = sideBuffer - (this.y - this.radius);
+                        this.velocity.y += overlap * CONFIG.physics.repelStrength * edgeSmoothing;
+                    }
+
+                    // Repel from the bottom edge
+                    if (this.y + this.radius > canvas.height - sideBuffer) {
+                        const overlap = (this.y + this.radius) - (canvas.height - sideBuffer);
+                        this.velocity.y -= overlap * CONFIG.physics.repelStrength * edgeSmoothing;
+                    }
+
+                    // Clamp velocity to maxPlanetSpeed
+                    const maxSpeed = CONFIG.physics.maxPlanetSpeed;
+                    const velocityMagnitude = Math.sqrt(this.velocity.x ** 2 + this.velocity.y ** 2);
+                    if (velocityMagnitude > maxSpeed) {
+                        this.velocity.x = (this.velocity.x / velocityMagnitude) * maxSpeed;
+                        this.velocity.y = (this.velocity.y / velocityMagnitude) * maxSpeed;
+                    }
+
+                    // Update position based on velocity
+                    this.x += this.velocity.x;
+                    this.y += this.velocity.y;
+
+                    // Keep planet within canvas bounds
+                    this.x = Math.max(this.radius, Math.min(canvas.width - this.radius, this.x));
+                    this.y = Math.max(this.radius, Math.min(canvas.height - this.radius, this.y));
+                }
+
+                updateVolume() {
+                    // Calculate target volume based on orbiting particles
+                    const targetVolume = this.orbiterCount > 0
+                        ? Math.min(CONFIG.audio.maxVolume, CONFIG.audio.minVolume + this.orbiterCount * CONFIG.audio.volumeStep)
+                        : CONFIG.audio.minVolume;
+
+                    // Smooth the volume using exponential moving average (EMA)
+                    const smoothingFactor = CONFIG.audio.smoothingFactor;
+                    this.smoothedVolume = this.smoothedVolume * (1 - smoothingFactor) + targetVolume * smoothingFactor;
+
+                    // Update the player's volume
+                    players[this.index].volume.value = this.smoothedVolume;
+
+                    // Change color dynamically based on the number of orbiting particles
+                    const maxOrbiters = 100; // Maximum number of orbiters to map to the gradient
+                    const t = Math.min(1, this.orbiterCount / maxOrbiters); // Normalize orbiter count to [0, 1]
+                    this.color = interpolateColor(CONFIG.planets.colorGradient.minColor, CONFIG.planets.colorGradient.maxColor, t);
+
+                    // Reset orbiter count for the next frame
+                    this.orbiterCount = 0;
+                }
+            }
+            
+            // Helper function to interpolate between two colors
+            function interpolateColor(color1, color2, t) {
+                const c1 = hexToRgb(color1);
+                const c2 = hexToRgb(color2);
+                const r = Math.round(c1.r + (c2.r - c1.r) * t);
+                const g = Math.round(c1.g + (c2.g - c1.g) * t);
+                const b = Math.round(c1.b + (c2.b - c1.b) * t);
+                return `rgb(${r}, ${g}, ${b})`;
+            }
+
+            // Helper function to convert hex color to RGB
+            function hexToRgb(hex) {
+                const bigint = parseInt(hex.slice(1), 16);
+                return {
+                    r: (bigint >> 16) & 255,
+                    g: (bigint >> 8) & 255,
+                    b: bigint & 255
+                };
+            }
+
+            // Helper function to convert hex color to RGBA
+            function hexToRgba(hex, alpha) {
+                const bigint = parseInt(hex.slice(1), 16);
+                const r = (bigint >> 16) & 255;
+                const g = (bigint >> 8) & 255;
+                const b = (bigint & 255);
+                return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+            }
+
+            // Create particles that will orbit planets
+            class Particle {
+                constructor() {
+                    // Place particles according to config setting
+                    if (CONFIG.particles.startInCenter) {
+                        // Start in center
+                        this.x = canvas.width / 2;
+                        this.y = canvas.height / 2;
+                    } else {
+                        // Random placement
+                        this.x = Math.random() * canvas.width;
+                        this.y = Math.random() * canvas.height;
+                    }
+                    
+                    this.velocity = {
+                        x: Math.random() * 0.2 - 0.1,
+                        y: Math.random() * 0.2 - 0.1
+                    };
+                    
+                    this.radius = Math.random() * (CONFIG.particles.maxRadius - CONFIG.particles.minRadius) + CONFIG.particles.minRadius;
+                    this.mass = this.radius * CONFIG.particles.massFactor;
+                    this.speed = 0;
+                    this.color = CONFIG.particles.baseColor;
+                }
+                
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                    ctx.fillStyle = this.color;
+                    ctx.fill();
+                }
+                
+                update(planets) {
+                    let isOrbiting = false;
+
+                    for (const planet of planets) {
+                        const dx = planet.x - this.x;
+                        const dy = planet.y - this.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+
+                        const forcefieldRadius = planet.radius + CONFIG.physics.forcefieldBuffer;
+
+                        if (distance < forcefieldRadius) {
+                            // Smooth repelling force based on distance
+                            const overlap = forcefieldRadius - distance;
+                            const repelForce = CONFIG.physics.repelStrength * (overlap / forcefieldRadius); // Scale repelling force
+
+                            const angle = Math.atan2(dy, dx);
+
+                            // Apply repelling force
+                            this.velocity.x -= Math.cos(angle) * repelForce;
+                            this.velocity.y -= Math.sin(angle) * repelForce;
+
+                            // Reverse velocity slightly to simulate bounce
+                            this.velocity.x *= CONFIG.physics.bounceReduction;
+                            this.velocity.y *= CONFIG.physics.bounceReduction;
+                        } else {
+                            // Apply gravitational force if outside the forcefield
+                            const gravitationalForce = CONFIG.physics.gravitationalConstant * (planet.mass * this.mass) / (distance * distance);
+                            this.velocity.x += (dx / distance) * gravitationalForce;
+                            this.velocity.y += (dy / distance) * gravitationalForce;
+
+                            // Dynamically calculate orbit radius based on planet size
+                            const orbitRadius = planet.radius * CONFIG.physics.orbitRadiusFactor;
+
+                            // Mark particle as orbiting if within orbiting range
+                            if (distance < orbitRadius) {
+                                isOrbiting = true;
+                                planet.orbiterCount++;
+                            }
+                        }
+                    }
+
+                    // Ensure minimum speed
+                    const minSpeed = CONFIG.particles.minSpeed;
+                    const velocityMagnitude = Math.sqrt(this.velocity.x ** 2 + this.velocity.y ** 2);
+                    if (velocityMagnitude < minSpeed) {
+                        this.velocity.x = (this.velocity.x / velocityMagnitude) * minSpeed;
+                        this.velocity.y = (this.velocity.y / velocityMagnitude) * minSpeed;
+                    }
+
+                    // Update position
+                    this.x += this.velocity.x;
+                    this.y += this.velocity.y;
+
+                    // Calculate speed
+                    this.speed = Math.sqrt(this.velocity.x ** 2 + this.velocity.y ** 2);
+
+                    // Change color based on speed
+                    const speedFactor = Math.min(this.speed * CONFIG.particles.speedColorFactor, 1);
+                    const r = Math.floor(0 + speedFactor * 255);
+                    const g = Math.floor(102 + speedFactor * 153);
+                    const b = Math.floor(255);
+                    this.color = `rgb(${r}, ${g}, ${b})`;
+
+                    // Boundaries - wrap around
+                    if (this.x < 0) this.x = canvas.width;
+                    if (this.x > canvas.width) this.x = 0;
+                    if (this.y < 0) this.y = canvas.height;
+                    if (this.y > canvas.height) this.y = 0;
+
+                    return isOrbiting;
+                }
+            }
+            
+            // Create planets and particles
+            const planets = [];
+            for (let i = 0; i < CONFIG.planets.count; i++) {
+                planets.push(new Planet(i));
+            }
+            
+            const particles = [];
+            // Calculate particle count based on configuration and screen size
+            const particleCount = CONFIG.particles.useScreenSizeScaling 
+                ? Math.min(CONFIG.particles.count, Math.floor(canvas.width * canvas.height / CONFIG.particles.densityFactor))
+                : CONFIG.particles.count;
+            
+            for (let i = 0; i < particleCount; i++) {
+                particles.push(new Particle());
+            }
+            
+            // Interaction handling
+            let draggedPlanet = null;
+            let lastMousePosition = { x: 0, y: 0 };
+            let mouseVelocity = { x: 0, y: 0 };
+
+            function handleStart(e) {
+                e.preventDefault();
+                const pointer = e.touches ? e.touches[0] : e;
+                const rect = canvas.getBoundingClientRect();
+                const x = pointer.clientX - rect.left;
+                const y = pointer.clientY - rect.top;
+
+                // Check if a planet was clicked
+                for (const planet of planets) {
+                    const dx = planet.x - x;
+                    const dy = planet.y - y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance < planet.radius) {
+                        draggedPlanet = planet;
+                        planet.isDragging = true;
+                        lastMousePosition = { x, y }; // Initialize last mouse position
+                        break;
+                    }
+                }
+            }
+
+            function handleMove(e) {
+                e.preventDefault();
+                if (draggedPlanet) {
+                    const pointer = e.touches ? e.touches[0] : e;
+                    const rect = canvas.getBoundingClientRect();
+                    const x = pointer.clientX - rect.left;
+                    const y = pointer.clientY - rect.top;
+
+                    // Calculate mouse velocity
+                    mouseVelocity.x = x - lastMousePosition.x;
+                    mouseVelocity.y = y - lastMousePosition.y;
+
+                    // Update last mouse position
+                    lastMousePosition = { x, y };
+
+                    // Move the dragged planet
+                    draggedPlanet.x = x;
+                    draggedPlanet.y = y;
+
+                    // Keep planet within bounds
+                    draggedPlanet.x = Math.max(draggedPlanet.radius, Math.min(canvas.width - draggedPlanet.radius, draggedPlanet.x));
+                    draggedPlanet.y = Math.max(draggedPlanet.radius, Math.min(canvas.height - draggedPlanet.radius, draggedPlanet.y));
+                }
+            }
+
+            function handleEnd(e) {
+                e.preventDefault();
+                if (draggedPlanet) {
+                    // Apply a fraction of the mouse velocity to the planet's velocity
+                    const velocityFactor = 0.1; // Adjust this value to control how much of the mouse velocity is applied
+                    draggedPlanet.velocity.x += mouseVelocity.x * velocityFactor;
+                    draggedPlanet.velocity.y += mouseVelocity.y * velocityFactor;
+
+                    draggedPlanet.isDragging = false;
+                    draggedPlanet = null;
+
+                    // Reset mouse velocity
+                    mouseVelocity = { x: 0, y: 0 };
+                }
+            }
+            
+            // Add event listeners
+            canvas.addEventListener('mousedown', handleStart);
+            canvas.addEventListener('mousemove', handleMove);
+            canvas.addEventListener('mouseup', handleEnd);
+            canvas.addEventListener('touchstart', handleStart);
+            canvas.addEventListener('touchmove', handleMove);
+            canvas.addEventListener('touchend', handleEnd);
+            
+            // Animation loop
+            function animate() {
+                requestAnimationFrame(animate);
+                
+                // Clear canvas with trail effect
+                ctx.fillStyle = `rgba(0, 0, 0, ${CONFIG.effects.trailOpacity})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Reset orbiter counts
+                planets.forEach(planet => {
+                    planet.orbiterCount = 0;
+                });
+                
+                // Update particles
+                for (const particle of particles) {
+                    particle.update(planets);
+                    particle.draw();
+                }
+                
+                // Update planets
+                for (const planet of planets) {
+                    planet.update(planets); // Apply gravitational forces between planets
+                    planet.draw();
+                    planet.updateVolume();
+                }
+            }
+            
+            // Start animation
+            animate();
+        }
+    </script>
+</body>
+</html>
